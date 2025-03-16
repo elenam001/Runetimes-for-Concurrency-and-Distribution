@@ -1,0 +1,234 @@
+import os
+import socket
+import statistics
+import sys
+import threading
+import json
+import logging
+import time
+import argparse
+import signal
+
+import protocol
+
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(message)s')
+
+
+# ----------------------------
+# Naming Registry for APNs
+# Maps APNs to IPCP instances
+# ----------------------------
+class NamingRegistry:
+    def __init__(self):
+        self.registry = {}
+    
+    def register(self, apn, ipcp):
+        self.registry[apn] = ipcp
+        logging.info("Registered APN '%s' with IPCP instance.", apn)
+    
+    def resolve(self, apn):
+        return self.registry.get(apn, None)
+
+naming_registry = NamingRegistry()
+
+
+# ----------------------------
+# IPC Process (IPCP)
+# Creates IPCP instances for each APN
+# ----------------------------
+class IPCP:
+    def __init__(self, apn, dif):
+        self.apn = apn
+        self.dif = dif
+        self.flows = {}
+        naming_registry.register(apn, self)
+    
+    # In IPCP class
+    def handle_message(self, message, client_sock, client_addr):
+        try:
+            # First try binary protocol
+            timestamp, flow_id, payload = protocol.unpack_message(message)
+            if payload == b"FLOW_REQ":
+                new_flow_id = f"{self.apn}-flow-{time.time()}"
+                response = protocol.pack_message(
+                    flow_id=new_flow_id,
+                    payload=b"FLOW_OK"
+                )
+                client_sock.sendall(response)
+                self.flows[new_flow_id] = (client_addr, time.time())
+        except:
+            # Fallback to JSON handling
+            msg_type = message.get("type")
+            if msg_type == "flow_allocation_request":
+                flow_id = f"{self.apn}-flow-{time.time()}"
+                response = json.dumps({"flow_id": flow_id}).encode()
+                client_sock.sendall(response)
+            elif msg_type == "data_transfer":
+                # Send acknowledgment
+                response = json.dumps({"type": "ack", "flow_id": flow_id}).encode()
+                client_sock.sendall(response)
+
+        # In IPCP class
+    def handle_binary_message(self, timestamp, flow_id, payload, sock):
+        if payload.startswith(b"REQ:"):
+            # Allocate new flow
+            new_flow_id = f"{self.apn}-flow-{time.time()}"
+            response = protocol.pack_message(
+                flow_id=new_flow_id,
+                payload=b"ACK"
+            )
+            sock.sendall(response)
+            self.flows[new_flow_id] = (sock.getpeername(), time.time())
+
+# ----------------------------
+# DIF (Distributed Inter-Process Communication Facility)
+# ----------------------------
+class DIF:
+    def __init__(self, host='localhost', port=10000, node_name="Node"):
+        self.host = host
+        self.port = port
+        self.node_name = node_name
+        self.ipcps = {}
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)        
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.server_socket.bind((self.host, self.port))
+        except OSError as e:
+            logging.error(f"Failed to bind port {self.port}: {e}")
+            raise
+        self.server_socket.listen(5)
+        logging.info("%s: DIF started on %s:%d", self.node_name, self.host, self.port)
+        
+        signal.signal(signal.SIGINT, self.shutdown)
+        signal.signal(signal.SIGTERM, self.shutdown)
+    
+    def register_ipcp(self, apn):
+        ipcp = IPCP(apn, self)
+        self.ipcps[apn] = ipcp
+        return ipcp
+    
+    def run(self):
+        while True:
+            client_sock, addr = self.server_socket.accept()
+            logging.info("%s: Connection from %s", self.node_name, addr)
+            t = threading.Thread(target=self.handle_client, args=(client_sock, addr))
+            t.start()
+    
+    # In DIF class handle_client method
+    def handle_client(self, client_sock, addr):
+        try:
+            raw_data = client_sock.recv(4096)
+            if raw_data:
+                try:
+                    # First try binary protocol
+                    timestamp, flow_id, payload = protocol.unpack_message(raw_data)
+                    ipcp = naming_registry.resolve(self.apn)  # Your target APN
+                    ipcp.handle_binary_message(timestamp, flow_id, payload, client_sock)
+                except:
+                    # Fallback to JSON for compatibility
+                    message = json.loads(raw_data.decode())
+                    dest_apn = payload.decode().split(':')[1]
+                    ipcp = naming_registry.resolve(dest_apn)
+                    ipcp.handle_message(message, client_sock, addr)
+        except Exception as e:
+            logging.error("Connection handling failed: %s", str(e))
+        finally:
+            client_sock.close()
+            
+    def shutdown(self, signum, frame):
+        self.server_socket.close()
+        logging.info("Server socket closed")
+    
+    # TODO 
+    def send_to_tcp_server(self, tcp_host, tcp_port, message):
+        try:
+            tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            tcp_sock.connect((tcp_host, tcp_port))
+            tcp_sock.sendall(message.encode())
+            tcp_sock.close()
+            logging.info("%s: Sent message to TCP server %s:%d", self.node_name, tcp_host, tcp_port)
+        except Exception as e:
+            logging.error("%s: Error sending message to TCP server %s:%d: %s", self.node_name, tcp_host, tcp_port, e)
+
+
+# ----------------------------
+# Client Simulation
+# ----------------------------
+def client_simulation(src_apn, dest_apn, dest_host, dest_port, payload_size=1024, num_transfers=10):
+    # Allocate flow using JSON (compatibility)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as alloc_sock:
+        alloc_sock.connect((dest_host, dest_port))
+        alloc_sock.send(json.dumps({
+            "type": "flow_allocation_request",
+            "src_apn": src_apn,
+            "dest_apn": dest_apn
+        }).encode())
+        flow_id = json.loads(alloc_sock.recv(4096))["flow_id"]
+
+    # Data transfer using binary protocol
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_sock:
+        data_sock.connect((dest_host, dest_port))
+        latencies = []
+        
+        for _ in range(num_transfers):
+            payload = os.urandom(payload_size)
+            start = time.time()
+            
+            # Pack message using binary protocol
+            data_sock.sendall(protocol.pack_message(
+                flow_id=flow_id,
+                payload=payload
+            ))
+            
+            # Wait for acknowledgment
+            ack = data_sock.recv(protocol.HEADER_SIZE + protocol.FLOW_ID_LENGTH)
+            latencies.append(time.time() - start)
+    
+    return statistics.mean(latencies)
+
+
+# ----------------------------
+# Main 
+# ----------------------------
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="RINA Node Simulation")
+    parser.add_argument('--port', type=int, default=10000, help="Port number for the DIF server")
+    parser.add_argument('--node', type=str, default="NodeA", help="Name of the node/DIF")
+    parser.add_argument('--apn', type=str, default="APN_A", help="Application Process Name for the local IPCP")
+    parser.add_argument('--dest_port', type=int, help="Destination node's port for client simulation")
+    parser.add_argument('--dest_apn', type=str, help="Destination APN for client simulation")
+    parser.add_argument('--simulate_loss', action='store_true', help="Enable packet loss simulation")
+    parser.add_argument('--tcp_host', type=str, help="TCP server host")
+    parser.add_argument('--tcp_port', type=int, help="TCP server port")
+    parser.add_argument('--server', action='store_true', help="Run in server mode")
+    args = parser.parse_args()
+
+    if args.server:
+        # SERVER MODE
+        dif = DIF(port=args.port, node_name=args.node)
+        dif.register_ipcp(args.apn)
+        try:
+            dif.run()  # Blocking call
+        except KeyboardInterrupt:
+            dif.shutdown(None, None)
+    else:
+        # CLIENT MODE
+        if not (args.dest_port or args.tcp_host):
+            logging.error("Specify either --dest_port/--dest_apn or --tcp_host/--tcp_port")
+            sys.exit(1)
+            
+        # Client simulation without server initialization
+        client_simulation(
+            src_apn=args.apn,
+            dest_apn=args.dest_apn or "APN_TCP",
+            dest_host='localhost',
+            dest_port=args.dest_port or 10000,
+            payload_size=1024,  # Default payload size
+            num_transfers=10,   # Default number of transfers
+            simulate_loss=args.simulate_loss
+        )
+
+
+# Server mode (Terminal 1) python rina.py --server --port 10002 --node NodeA --apn APN_A
+
+# Client mode (Terminal 2) python rina.py --dest_port 10000 --dest_apn APN_TCP --apn APN_A
