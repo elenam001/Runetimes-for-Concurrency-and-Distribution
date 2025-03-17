@@ -12,21 +12,18 @@ import protocol
 def allocate_flow(host, port, dest_apn):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(2)
+            s.settimeout(5)
             s.connect((host, port))
             
-            # Send binary flow request
+            # Send binary flow request with APN
             request = protocol.pack_message(
                 flow_id="FLOW_REQ",
-                payload=dest_apn.encode()
+                payload=f"REQ:{dest_apn}".encode()  # Include APN in payload
             )
             s.sendall(request)
             
-            # Receive response
+            # Wait for binary response
             response = s.recv(1024)
-            if len(response) < protocol.HEADER_SIZE:
-                raise ValueError("Invalid response length")
-                
             _, flow_id, _ = protocol.unpack_message(response)
             return flow_id
             

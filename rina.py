@@ -10,7 +10,8 @@ import argparse
 import signal
 
 import protocol
-
+# Add to top of rina.py
+logging.basicConfig(level=logging.DEBUG)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(message)s')
 
 
@@ -64,7 +65,7 @@ class IPCP:
                 response = json.dumps({"flow_id": flow_id}).encode()
                 client_sock.sendall(response)
             elif msg_type == "data_transfer":
-                # Send acknowledgment
+                flow_id = message.get("flow_id", "unknown")
                 response = json.dumps({"type": "ack", "flow_id": flow_id}).encode()
                 client_sock.sendall(response)
 
@@ -114,24 +115,48 @@ class DIF:
             t = threading.Thread(target=self.handle_client, args=(client_sock, addr))
             t.start()
     
-    # In DIF class handle_client method
     def handle_client(self, client_sock, addr):
         try:
             raw_data = client_sock.recv(4096)
             if raw_data:
+                # Binary protocol handling
                 try:
-                    # First try binary protocol
                     timestamp, flow_id, payload = protocol.unpack_message(raw_data)
-                    ipcp = naming_registry.resolve(self.apn)  # Your target APN
-                    ipcp.handle_binary_message(timestamp, flow_id, payload, client_sock)
-                except:
-                    # Fallback to JSON for compatibility
+                    if flow_id:
+                        logging.info(f"Received data for flow {flow_id}, payload size {len(payload)} bytes")
+                        # Send acknowledgment
+                        ack = protocol.pack_message(flow_id=flow_id, payload=b"ACK")
+                        client_sock.sendall(ack)
+                        dest_apn = payload.split(b":")[1].decode()
+                        ipcp = naming_registry.resolve(dest_apn)
+                        if ipcp:
+                            new_flow_id = f"{dest_apn}-flow-{time.time()}"
+                            response = protocol.pack_message(
+                                flow_id=new_flow_id,
+                                payload=b"FLOW_OK"
+                            )
+                            client_sock.sendall(response)
+                            logging.info(f"Allocated flow {new_flow_id}")
+                            return
+                except Exception as e:
+                    logging.debug(f"Binary parse failed: {e}")
+
+                # JSON fallback (for compatibility)
+                try:
                     message = json.loads(raw_data.decode())
-                    dest_apn = payload.decode().split(':')[1]
-                    ipcp = naming_registry.resolve(dest_apn)
-                    ipcp.handle_message(message, client_sock, addr)
+                    if message.get('type') == 'flow_allocation_request':
+                        dest_apn = message.get('dest_apn')
+                        ipcp = naming_registry.resolve(dest_apn)
+                        if ipcp:
+                            new_flow_id = f"{dest_apn}-flow-{time.time()}"
+                            response = json.dumps({"flow_id": new_flow_id}).encode()
+                            client_sock.sendall(response)
+                            logging.info(f"Allocated flow {new_flow_id} (JSON)")
+                except Exception as e:
+                    logging.error(f"Message handling failed: {e}")
+
         except Exception as e:
-            logging.error("Connection handling failed: %s", str(e))
+            logging.error(f"Connection error: {e}")
         finally:
             client_sock.close()
             
@@ -158,11 +183,7 @@ def client_simulation(src_apn, dest_apn, dest_host, dest_port, payload_size=1024
     # Allocate flow using JSON (compatibility)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as alloc_sock:
         alloc_sock.connect((dest_host, dest_port))
-        alloc_sock.send(json.dumps({
-            "type": "flow_allocation_request",
-            "src_apn": src_apn,
-            "dest_apn": dest_apn
-        }).encode())
+        alloc_sock.send(json.dumps({"type": "flow_allocation_request", "src_apn": src_apn, "dest_apn": dest_apn}).encode())
         flow_id = json.loads(alloc_sock.recv(4096))["flow_id"]
 
     # Data transfer using binary protocol
@@ -181,7 +202,8 @@ def client_simulation(src_apn, dest_apn, dest_host, dest_port, payload_size=1024
             ))
             
             # Wait for acknowledgment
-            ack = data_sock.recv(protocol.HEADER_SIZE + protocol.FLOW_ID_LENGTH)
+            ack_data = data_sock.recv(4096)
+            _, ack_flow_id, ack_payload = protocol.unpack_message(ack_data)
             latencies.append(time.time() - start)
     
     return statistics.mean(latencies)
@@ -208,6 +230,7 @@ if __name__ == '__main__':
         dif = DIF(port=args.port, node_name=args.node)
         dif.register_ipcp(args.apn)
         try:
+            logging.info(f"Active APNs: {list(naming_registry.registry.keys())}")
             dif.run()  # Blocking call
         except KeyboardInterrupt:
             dif.shutdown(None, None)
@@ -225,7 +248,6 @@ if __name__ == '__main__':
             dest_port=args.dest_port or 10000,
             payload_size=1024,  # Default payload size
             num_transfers=10,   # Default number of transfers
-            simulate_loss=args.simulate_loss
         )
 
 
