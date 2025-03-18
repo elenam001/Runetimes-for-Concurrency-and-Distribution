@@ -11,7 +11,6 @@ import signal
 
 import protocol
 # Add to top of rina.py
-logging.basicConfig(level=logging.DEBUG)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(message)s')
 
 
@@ -59,27 +58,29 @@ class IPCP:
                 self.flows[new_flow_id] = (client_addr, time.time())
         except:
             # Fallback to JSON handling
+            message = json.loads(message.decode())
             msg_type = message.get("type")
             if msg_type == "flow_allocation_request":
                 flow_id = f"{self.apn}-flow-{time.time()}"
                 response = json.dumps({"flow_id": flow_id}).encode()
                 client_sock.sendall(response)
             elif msg_type == "data_transfer":
-                flow_id = message.get("flow_id", "unknown")
+                flow_id = message.get("flow_id")  # Ensure this line exists!
                 response = json.dumps({"type": "ack", "flow_id": flow_id}).encode()
                 client_sock.sendall(response)
 
-        # In IPCP class
+
     def handle_binary_message(self, timestamp, flow_id, payload, sock):
         if payload.startswith(b"REQ:"):
-            # Allocate new flow
+            # Flow allocation logic
             new_flow_id = f"{self.apn}-flow-{time.time()}"
-            response = protocol.pack_message(
-                flow_id=new_flow_id,
-                payload=b"ACK"
-            )
+            response = protocol.pack_message(flow_id=new_flow_id, payload=b"ACK")
             sock.sendall(response)
             self.flows[new_flow_id] = (sock.getpeername(), time.time())
+        else:
+            # Send ACK for data packets
+            response = protocol.pack_message(flow_id=flow_id, payload=b"ACK")
+            sock.sendall(response)
 
 # ----------------------------
 # DIF (Distributed Inter-Process Communication Facility)
@@ -117,31 +118,33 @@ class DIF:
     
     def handle_client(self, client_sock, addr):
         try:
-            raw_data = client_sock.recv(4096)
-            if raw_data:
-                # Binary protocol handling
+            while True:
+                raw_data = client_sock.recv(4096)
+                if not raw_data:
+                    break
                 try:
+                    # Try binary protocol
                     timestamp, flow_id, payload = protocol.unpack_message(raw_data)
-                    if flow_id:
-                        logging.info(f"Received data for flow {flow_id}, payload size {len(payload)} bytes")
-                        # Send acknowledgment
-                        ack = protocol.pack_message(flow_id=flow_id, payload=b"ACK")
-                        client_sock.sendall(ack)
-                        dest_apn = payload.split(b":")[1].decode()
-                        ipcp = naming_registry.resolve(dest_apn)
-                        if ipcp:
-                            new_flow_id = f"{dest_apn}-flow-{time.time()}"
-                            response = protocol.pack_message(
-                                flow_id=new_flow_id,
-                                payload=b"FLOW_OK"
-                            )
-                            client_sock.sendall(response)
-                            logging.info(f"Allocated flow {new_flow_id}")
-                            return
+                    logging.info(f"Received data for flow {flow_id}")
+
+                    # Extract destination APN from payload or flow_id
+                    if payload.startswith(b"REQ:"):
+                        dest_apn = payload.split(b":")[1].decode().strip()
+                    else:
+                        dest_apn = flow_id.split("-")[0]  # Assume flow_id format: "APN_A-flow-..."
+
+                    # Resolve IPCP using the extracted APN
+                    ipcp = naming_registry.resolve(dest_apn)
+                    if ipcp:
+                        ipcp.handle_binary_message(timestamp, flow_id, payload, client_sock)
+                    else:
+                        logging.error(f"No IPCP found for APN: {dest_apn}")
+
+                    continue  # Skip JSON fallback
                 except Exception as e:
                     logging.debug(f"Binary parse failed: {e}")
 
-                # JSON fallback (for compatibility)
+                # JSON fallback (for flow allocation)
                 try:
                     message = json.loads(raw_data.decode())
                     if message.get('type') == 'flow_allocation_request':
@@ -164,7 +167,6 @@ class DIF:
         self.server_socket.close()
         logging.info("Server socket closed")
     
-    # TODO 
     def send_to_tcp_server(self, tcp_host, tcp_port, message):
         try:
             tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -184,7 +186,13 @@ def client_simulation(src_apn, dest_apn, dest_host, dest_port, payload_size=1024
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as alloc_sock:
         alloc_sock.connect((dest_host, dest_port))
         alloc_sock.send(json.dumps({"type": "flow_allocation_request", "src_apn": src_apn, "dest_apn": dest_apn}).encode())
-        flow_id = json.loads(alloc_sock.recv(4096))["flow_id"]
+        resp = alloc_sock.recv(4096)
+        try:
+            flow_id = json.loads(resp)["flow_id"]
+        except Exception as e:
+            logging.error("Failed to extract flow_id from response: %s", e)
+            return
+
 
     # Data transfer using binary protocol
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_sock:
