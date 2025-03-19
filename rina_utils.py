@@ -7,7 +7,7 @@ import time
 def allocate_flow(host, port, dest_apn):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(5)
+            s.settimeout(10)
             s.connect((host, port))
             request = protocol.pack_message(
                 flow_id="FLOW_REQ",
@@ -26,7 +26,7 @@ def send_data(host, port, flow_id, dest_apn, payload_size=1024):
     try:
         payload = os.urandom(payload_size)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(2)
+            s.settimeout(5)
             s.connect((host, port))
             start = time.time()
             # Send via binary protocol

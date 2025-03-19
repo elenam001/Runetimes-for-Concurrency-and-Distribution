@@ -31,8 +31,16 @@ class Flow:
             self.flow_id = None
             self.connected = False
 
-    def send(self, payload_size=1024):
-        if not self.connected:
-            print(f"Flow not active for {self.apn}, re-allocating...")
-            self.allocate()
-        return send_data(self.host, self.port, self.flow_id, self.apn, payload_size)
+    # flow.py
+    def send(self, payload_size=1024, retries=3):
+        for attempt in range(retries):
+            try:
+                if not self.connected:
+                    self.allocate()
+                latency = send_data(self.host, self.port, self.flow_id, self.apn, payload_size)
+                if latency:
+                    return latency
+            except Exception as e:
+                print(f"Attempt {attempt+1} failed: {e}")
+                time.sleep(0.1 * (attempt + 1))  # Backoff
+        return None

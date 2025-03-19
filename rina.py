@@ -77,6 +77,10 @@ class IPCP:
             response = protocol.pack_message(flow_id=new_flow_id, payload=b"ACK")
             sock.sendall(response)
             self.flows[new_flow_id] = (sock.getpeername(), time.time())
+        elif payload == b"TEARDOWN":
+            if flow_id in self.flows:
+                del self.flows[flow_id]
+                sock.sendall(protocol.pack_message(flow_id=flow_id, payload=b"TEARDOWN_ACK"))
         else:
             # Send ACK for data packets
             response = protocol.pack_message(flow_id=flow_id, payload=b"ACK")
