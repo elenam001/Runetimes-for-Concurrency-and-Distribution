@@ -3,7 +3,7 @@ import threading
 import json
 import logging
 import time
-from rina import ipcp, dif, protocol
+import rina, protocol
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -16,8 +16,8 @@ class RINA_TCP_Gateway:
         tcp_port=11000, 
         gateway_tcp_port=12000
     ):
-        self.dif = dif.DIF(host=rina_host, port=rina_port, node_name="GatewayDIF")
-        self.ipcp = ipcp.IPCP("APN_TCP", self.dif)  
+        self.dif = rina.DIF(host=rina_host, port=rina_port, node_name="GatewayDIF")
+        self.ipcp = rina.IPCP("APN_TCP", self.dif)  
         self.dif.register_ipcp("APN_TCP") 
         self.apn_mappings = {"APN_A": (tcp_host, tcp_port)} 
         self.rina_host = rina_host
@@ -25,6 +25,7 @@ class RINA_TCP_Gateway:
         self.tcp_host = tcp_host
         self.tcp_port = tcp_port
         self.gateway_tcp_port = gateway_tcp_port
+        self.flow_lock = threading.Lock()
 
         # Connection mappings
         self.flow_map = {}          
@@ -110,6 +111,7 @@ class RINA_TCP_Gateway:
 
     def _allocate_rina_flow(self):
         try:
+#            with self.flow_lock:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.connect((self.rina_host, self.rina_port))
                 s.send(json.dumps({

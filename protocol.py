@@ -1,4 +1,5 @@
 # protocol.py
+import logging
 import struct
 import time
 
@@ -13,9 +14,13 @@ def pack_message(flow_id: str, payload: bytes) -> bytes:
     return header + flow_bytes + payload
 
 def unpack_message(data: bytes) -> tuple:
-    """Unpack message and validate structure"""
-    if len(data) < HEADER_SIZE + FLOW_ID_LENGTH:
-        raise ValueError("Message too short")
+    try:
+        """Unpack message and validate structure"""
+        if len(data) < HEADER_SIZE + FLOW_ID_LENGTH:
+            raise ValueError("Message too short")
+    except Exception as e:
+        logging.error(f"Failed to unpack message: {e}")
+        raise  # Propagate error for handling upstream
     
     timestamp, payload_size = struct.unpack(HEADER_FORMAT, data[:HEADER_SIZE])
     flow_id = data[HEADER_SIZE:HEADER_SIZE+FLOW_ID_LENGTH].decode().rstrip('\0')

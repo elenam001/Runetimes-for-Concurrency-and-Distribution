@@ -1,3 +1,4 @@
+import logging
 import socket
 import os
 import protocol
@@ -17,11 +18,11 @@ def allocate_flow(host, port, dest_apn):
             _, flow_id, _ = protocol.unpack_message(response)
             return flow_id
     except Exception as e:
-        print(f"Flow allocation failed: {str(e)}")
+        logging.error(f"Flow allocation error: {str(e)}")
         return None
 
-# rina_utils.py
 def send_data(host, port, flow_id, dest_apn, payload_size=1024):
+    start = time.time()
     try:
         payload = os.urandom(payload_size)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -34,7 +35,10 @@ def send_data(host, port, flow_id, dest_apn, payload_size=1024):
             # Wait for ACK
             ack_data = s.recv(4096)
             _, ack_flow_id, ack_payload = protocol.unpack_message(ack_data)
+            logging.debug(f"send_data took {time.time() - start:.3f}s")
             return time.time() - start
     except Exception as e:
         print(f"Data transfer failed: {str(e)}")
+        logging.debug(f"send_data took {time.time() - start:.3f}s")
         return None
+

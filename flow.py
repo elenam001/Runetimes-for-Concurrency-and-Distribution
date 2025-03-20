@@ -10,15 +10,25 @@ class Flow:
         self.port = port
         self.flow_id = None
         self.connected = False
+        self.reuse_threshold = 20
+        self.packets_sent = 0  # Initialize counter
 
-    def allocate(self):
-        self.flow_id = allocate_flow(self.host, self.port, self.apn)
-        self.connected = bool(self.flow_id)
+
+    def allocate(self, retries=3):
+        for attempt in range(retries):
+            try:
+                self.flow_id = allocate_flow(self.host, self.port, self.apn)
+                if self.flow_id:
+                    self.connected = True
+                    return
+            except Exception as e:
+                print(f"Allocation attempt {attempt+1} failed: {e}")
+                time.sleep(0.5 * (attempt + 1))
+        self.connected = False 
 
     def teardown(self):
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(2)
+            with socket.socket() as s:
                 s.connect((self.host, self.port))
                 s.send(json.dumps({
                     "type": "teardown",
@@ -26,21 +36,25 @@ class Flow:
                     "apn": self.apn
                 }).encode())
         except Exception as e:
-            print(f"Teardown failed: {e}")
+            print(f"Teardown error: {e}")
         finally:
             self.flow_id = None
             self.connected = False
-
-    # flow.py
-    def send(self, payload_size=1024, retries=3):
+            self.packets_sent = 0
+            
+    def send(self, payload_size=1024, retries=5):
         for attempt in range(retries):
             try:
                 if not self.connected:
                     self.allocate()
                 latency = send_data(self.host, self.port, self.flow_id, self.apn, payload_size)
                 if latency:
+                    self.packets_sent += 1  # Increment on success
+                    if self.packets_sent >= self.reuse_threshold:
+                        self.teardown()  # Teardown only after threshold
                     return latency
             except Exception as e:
-                print(f"Attempt {attempt+1} failed: {e}")
-                time.sleep(0.1 * (attempt + 1))  # Backoff
+                delay = 0.2 * (2 ** attempt)  # Exponential backoff: 0.2s, 0.4s, 0.8s...
+                print(f"Attempt {attempt+1} failed. Retrying in {delay:.1f}s...")
+                time.sleep(delay)
         return None
