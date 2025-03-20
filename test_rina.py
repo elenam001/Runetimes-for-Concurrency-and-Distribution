@@ -3,7 +3,7 @@ import statistics
 import time
 import argparse
 from datetime import datetime
-from rina import flow
+from rina_src import flow
 
 def run_test(host, port, dest_apn, num_packets=100, payload_kb=1, teardown_interval=10):
     flow = flow.Flow(dest_apn, host, port)
