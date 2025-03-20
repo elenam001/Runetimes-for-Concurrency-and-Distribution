@@ -1,5 +1,4 @@
 import socket
-import json
 import os
 import protocol
 import time
