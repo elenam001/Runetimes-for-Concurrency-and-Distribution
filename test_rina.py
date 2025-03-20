@@ -1,12 +1,12 @@
-from flow import Flow
 import time
 import statistics
 import time
 import argparse
 from datetime import datetime
+from rina import flow
 
 def run_test(host, port, dest_apn, num_packets=100, payload_kb=1, teardown_interval=10):
-    flow = Flow(dest_apn, host, port)
+    flow = flow.Flow(dest_apn, host, port)
     flow.allocate()
 
     results = {

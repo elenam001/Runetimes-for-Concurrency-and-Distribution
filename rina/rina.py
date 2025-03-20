@@ -6,9 +6,9 @@ import json
 import logging
 import time
 import argparse
-import rina.protocol as protocol
+import protocol
 import naming_registry
-from rina.rina import DIF
+import dif
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -68,7 +68,7 @@ if __name__ == '__main__':
 
     if args.server:
         # SERVER MODE
-        dif = DIF(port=args.port, node_name=args.node)
+        dif = dif.DIF(port=args.port, node_name=args.node)
         dif.register_ipcp(args.apn)
         try:
             logging.info(f"Active APNs: {list(naming_registry.registry.keys())}")

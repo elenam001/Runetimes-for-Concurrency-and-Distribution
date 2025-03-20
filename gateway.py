@@ -3,14 +3,12 @@ import threading
 import json
 import logging
 import time
-from rina import IPCP, DIF
-import protocol
+from rina import ipcp, dif, protocol
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(message)s')
 
 class RINA_TCP_Gateway:
     def __init__(
-        # At the top of RINA_TCP_Gateway __init__:
         self, 
         rina_host='localhost', 
         rina_port=10000,
@@ -18,11 +16,10 @@ class RINA_TCP_Gateway:
         tcp_port=11000, 
         gateway_tcp_port=12000
     ):
-        self.dif = DIF(host=rina_host, port=rina_port, node_name="GatewayDIF")
-        self.ipcp = IPCP("APN_TCP", self.dif)  # Matches APN mapping
-        self.dif.register_ipcp("APN_TCP")  # Critical!
-        # Inside RINA_TCP_Gateway __init__:
-        self.apn_mappings = {"APN_A": (tcp_host, tcp_port)}  # Changed from APN_TCP to APN_A
+        self.dif = dif.DIF(host=rina_host, port=rina_port, node_name="GatewayDIF")
+        self.ipcp = ipcp.IPCP("APN_TCP", self.dif)  
+        self.dif.register_ipcp("APN_TCP") 
+        self.apn_mappings = {"APN_A": (tcp_host, tcp_port)} 
         self.rina_host = rina_host
         self.rina_port = rina_port
         self.tcp_host = tcp_host
@@ -30,8 +27,8 @@ class RINA_TCP_Gateway:
         self.gateway_tcp_port = gateway_tcp_port
 
         # Connection mappings
-        self.flow_map = {}          # RINA flow ID ↔ TCP socket
-        self.tcp_flow_map = {}      # TCP socket ↔ RINA flow ID
+        self.flow_map = {}          
+        self.tcp_flow_map = {}      
         self.apn_mappings = {"APN_TCP": (tcp_host, tcp_port)}
 
         # Initialize servers
