@@ -1,6 +1,9 @@
+import logging
 import socket
 import json
+import struct
 import time
+import protocol
 from rina_utils import allocate_flow, send_data
 
 class Flow:
@@ -11,21 +14,33 @@ class Flow:
         self.flow_id = None
         self.connected = False
         self.reuse_threshold = 20
-        self.packets_sent = 0  # Initialize counter
+        self.packets_sent = 0 
 
-
-    def allocate(self, retries=3):
+    def allocate(self, retries=5):
         for attempt in range(retries):
             try:
                 self.flow_id = allocate_flow(self.host, self.port, self.apn)
                 if self.flow_id:
-                    self.connected = True
-                    return
+                    # Create a new socket for verification
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(5)  # 5-second timeout
+                        s.connect((self.host, self.port))
+                        # Send test packet
+                        test_payload = protocol.pack_message(
+                            flow_id=self.flow_id, 
+                            payload=b"TEST_PACKET"
+                        )
+                        s.sendall(test_payload)
+                        # Wait for ACK
+                        ack = s.recv(1024)
+                        if not ack:
+                            raise ValueError("Flow verification failed")
+                        self.connected = True
+                        return
             except Exception as e:
-                print(f"Allocation attempt {attempt+1} failed: {e}")
-                time.sleep(0.5 * (attempt + 1))
-        self.connected = False 
-
+                logging.error(f"Allocation attempt {attempt+1} failed: {str(e)}")
+                time.sleep(2 ** attempt)  # Exponential backoff
+        self.connected = False
     def teardown(self):
         try:
             with socket.socket() as s:
@@ -43,8 +58,12 @@ class Flow:
             self.packets_sent = 0
             
     def send(self, payload_size=1024, retries=5):
+        self._send_heartbeat()
         for attempt in range(retries):
             try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 10))  # Graceful close
+                    s.settimeout(10)
                 if not self.connected:
                     self.allocate()
                 latency = send_data(self.host, self.port, self.flow_id, self.apn, payload_size)
@@ -58,3 +77,14 @@ class Flow:
                 print(f"Attempt {attempt+1} failed. Retrying in {delay:.1f}s...")
                 time.sleep(delay)
         return None
+    
+    def _send_heartbeat(self):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((self.host, self.port))
+                s.send(protocol.pack_message(
+                    flow_id="HEARTBEAT",
+                    payload=b""  # Explicit empty payload
+                ))
+        except:
+            pass

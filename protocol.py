@@ -15,15 +15,17 @@ def pack_message(flow_id: str, payload: bytes) -> bytes:
 
 def unpack_message(data: bytes) -> tuple:
     try:
-        """Unpack message and validate structure"""
         if len(data) < HEADER_SIZE + FLOW_ID_LENGTH:
-            raise ValueError("Message too short")
+            # Instead of raising, return None to indicate incomplete message
+            return None, None, None
+        timestamp, payload_size = struct.unpack(HEADER_FORMAT, data[:HEADER_SIZE])
+        flow_id = data[HEADER_SIZE:HEADER_SIZE+FLOW_ID_LENGTH].decode().rstrip('\0')
+        payload = data[HEADER_SIZE+FLOW_ID_LENGTH:HEADER_SIZE+FLOW_ID_LENGTH+payload_size]
+        return timestamp, flow_id, payload
+    except struct.error as e:
+        logging.error(f"Corrupted header: {str(e)}")
+        return None, None, None
     except Exception as e:
-        logging.error(f"Failed to unpack message: {e}")
-        raise  # Propagate error for handling upstream
+        logging.error(f"Unpack error: {str(e)}")
+        return None, None, None
     
-    timestamp, payload_size = struct.unpack(HEADER_FORMAT, data[:HEADER_SIZE])
-    flow_id = data[HEADER_SIZE:HEADER_SIZE+FLOW_ID_LENGTH].decode().rstrip('\0')
-    payload = data[HEADER_SIZE+FLOW_ID_LENGTH:HEADER_SIZE+FLOW_ID_LENGTH+payload_size]
-    
-    return timestamp, flow_id, payload

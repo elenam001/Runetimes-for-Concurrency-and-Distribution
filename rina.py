@@ -39,6 +39,8 @@ class DIF:
             logging.error(f"Failed to bind port {self.port}: {e}")
             raise
         self.server_socket.listen(5)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)  # Enable keepalive
+        self.server_socket.settimeout(600)
         logging.info("%s: DIF started on %s:%d", self.node_name, self.host, self.port)
         
         signal.signal(signal.SIGINT, self.shutdown)
@@ -51,52 +53,117 @@ class DIF:
     
     def run(self):
         while True:
-            client_sock, addr = self.server_socket.accept()
-            logging.info("%s: Connection from %s", self.node_name, addr)
-            t = threading.Thread(target=self.handle_client, args=(client_sock, addr))
-            t.start()
+            try:
+                client_sock, addr = self.server_socket.accept()
+                logging.info("%s: Connection from %s", self.node_name, addr)
+                t = threading.Thread(target=self.handle_client, args=(client_sock, addr))
+                t.start()
+            except socket.timeout:
+                logging.debug("Server socket accept() timeout")
+            except Exception as e:
+                logging.error(f"Server error: {str(e)}")
     
     def handle_client(self, client_sock, addr):
+        buffer = b""
         try:
             while True:
-                raw_data = client_sock.recv(4096)
-                if not raw_data:
+                try:
+                    # Receive data with error handling
+                    raw_data = client_sock.recv(4096)
+                    if not raw_data:
+                        break  # Connection closed gracefully
+                    buffer += raw_data
+
+                    # Process complete binary messages
+                    while len(buffer) >= protocol.HEADER_SIZE + protocol.FLOW_ID_LENGTH:
+                        timestamp, flow_id, payload = protocol.unpack_message(buffer)
+                        
+                        if payload is None:  # Incomplete message
+                            break
+
+                        try:
+                            # Handle heartbeats first
+                            if flow_id == "HEARTBEAT":
+                                client_sock.sendall(protocol.pack_message(
+                                    flow_id="HEARTBEAT_ACK", 
+                                    payload=b""
+                                ))
+                                consumed = protocol.HEADER_SIZE + protocol.FLOW_ID_LENGTH + len(payload)
+                                buffer = buffer[consumed:]
+                                continue
+
+                            # Extract destination APN safely
+                            if payload.startswith(b"REQ:"):
+                                try:
+                                    dest_apn = payload.split(b":", 1)[1].decode().strip()
+                                except (IndexError, UnicodeDecodeError) as e:
+                                    logging.error(f"Invalid REQ format: {str(e)}")
+                                    consumed = protocol.HEADER_SIZE + protocol.FLOW_ID_LENGTH + len(payload)
+                                    buffer = buffer[consumed:]
+                                    continue
+                            else:
+                                # Extract APN from flow_id format: "APN-flow-timestamp"
+                                try:
+                                    dest_apn = flow_id.split("-")[0]
+                                except IndexError:
+                                    logging.error(f"Malformed flow ID: {flow_id}")
+                                    consumed = protocol.HEADER_SIZE + protocol.FLOW_ID_LENGTH + len(payload)
+                                    buffer = buffer[consumed:]
+                                    continue
+
+                            # Resolve and handle IPCP
+                            ipcp = naming_registry.resolve(dest_apn)
+                            if ipcp:
+                                ipcp.handle_binary_message(timestamp, flow_id, payload, client_sock)
+                            else:
+                                logging.error(f"No IPCP found for APN: {dest_apn}")
+
+                            # Update buffer after processing
+                            consumed = protocol.HEADER_SIZE + protocol.FLOW_ID_LENGTH + len(payload)
+                            buffer = buffer[consumed:]
+
+                        except Exception as e:
+                            logging.error(f"Message processing failed: {str(e)}")
+                            break  # Prevent infinite loop on corrupt messages
+
+                    # Process JSON messages only if buffer is empty after binary processing
+                    if not buffer:
+                        try:
+                            message = json.loads(raw_data.decode())
+                            if not isinstance(message, dict):
+                                raise ValueError("Message is not a JSON object")
+                            if 'type' not in message or 'dest_apn' not in message:
+                                raise ValueError("Missing required fields in JSON message")
+                                
+                            if message.get('type') == 'flow_allocation_request':
+                                dest_apn = message['dest_apn']
+                                ipcp = naming_registry.resolve(dest_apn)
+                                if ipcp:
+                                    new_flow_id = f"{dest_apn}-flow-{time.time()}"
+                                    ipcp.flows[new_flow_id] = (client_sock.getpeername(), time.time())
+                                    response = json.dumps({"flow_id": new_flow_id}).encode()
+                                    client_sock.sendall(response)
+                                    logging.info(f"Allocated flow {new_flow_id} (JSON)")
+
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            pass  # Skip non-JSON data
+                        except ValueError as e:
+                            logging.warning(f"Invalid JSON message: {str(e)}")
+
+                except (ConnectionResetError, BrokenPipeError):
+                    logging.info("Client disconnected abruptly")
                     break
-                try:
-                    timestamp, flow_id, payload = protocol.unpack_message(raw_data)
-                    logging.info(f"Received data for flow {flow_id}")
-                    if payload.startswith(b"REQ:"):
-                        dest_apn = payload.split(b":")[1].decode().strip()
-                    else:
-                        dest_apn = flow_id.split("-")[0]
-                    ipcp = naming_registry.resolve(dest_apn)
-                    if ipcp:
-                        ipcp.handle_binary_message(timestamp, flow_id, payload, client_sock)
-                    else:
-                        logging.error(f"No IPCP found for APN: {dest_apn}")
-
-                    continue  # Skip JSON fallback
-                except Exception as e:
-                    logging.debug(f"Binary parse failed: {e}")
-
-                # JSON fallback (for flow allocation)
-                try:
-                    message = json.loads(raw_data.decode())
-                    if message.get('type') == 'flow_allocation_request':
-                        dest_apn = message.get('dest_apn')
-                        ipcp = naming_registry.resolve(dest_apn)
-                        if ipcp:
-                            new_flow_id = f"{dest_apn}-flow-{time.time()}"
-                            response = json.dumps({"flow_id": new_flow_id}).encode()
-                            client_sock.sendall(response)
-                            logging.info(f"Allocated flow {new_flow_id} (JSON)")
-                except Exception as e:
-                    logging.error(f"Message handling failed: {e}")
+                except socket.timeout:
+                    logging.debug("Socket timeout")
+                    break
 
         except Exception as e:
-            logging.error(f"Connection error: {e}")
+            logging.error(f"Connection error: {str(e)}")
         finally:
-            client_sock.close()
+            try:
+                client_sock.close()
+            except Exception as e:
+                logging.debug(f"Error closing socket: {str(e)}")
             
     def shutdown(self, signum, frame):
         self.server_socket.close()
@@ -145,6 +212,12 @@ class IPCP:
 
 
     def handle_binary_message(self, timestamp, flow_id, payload, sock):
+        if flow_id == "HEARTBEAT":
+            sock.sendall(protocol.pack_message(flow_id="HEARTBEAT_ACK", payload=b""))
+            return
+        if payload == b"TEST_PACKET":
+            sock.sendall(protocol.pack_message(flow_id=flow_id, payload=b"ACK"))
+            return
         if payload.startswith(b"REQ:"):
             # Flow allocation logic
             new_flow_id = f"{self.apn}-flow-{time.time()}"
