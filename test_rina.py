@@ -58,7 +58,8 @@ def run_test(host, port, dest_apn, num_packets=100, payload_kb=1, teardown_inter
             "avg_latency": statistics.mean(results["latencies"]),
             "jitter": statistics.stdev(results["latencies"]) if len(results["latencies"]) > 1 else 0,
             "throughput": (results["successes"] * results["payload_size"]) / total_time,
-            "avg_setup_time": statistics.mean(results["setup_times"]) if results["setup_times"] else 0
+            "avg_setup_time": statistics.mean(results["setup_times"]) if results["setup_times"] else 0,
+            "avg_rtt" : statistics.mean(results["latencies"]) * 2
         })
 
     return results

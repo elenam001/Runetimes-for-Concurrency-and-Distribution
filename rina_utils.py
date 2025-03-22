@@ -1,3 +1,4 @@
+import json
 import logging
 import socket
 import os
@@ -16,7 +17,7 @@ def allocate_flow(host, port, dest_apn):
                 payload=f"REQ:{dest_apn}".encode()  # Required argument
             )            
             s.sendall(request)
-            
+            logging.debug(f"Sending flow allocation request: {json.dumps({'type': 'flow_allocation_request', 'dest_apn': dest_apn})}")
             # Read full response
             response = s.recv(1024)
             _, flow_id, _ = protocol.unpack_message(response)

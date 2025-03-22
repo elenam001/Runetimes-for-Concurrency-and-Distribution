@@ -3,7 +3,7 @@ import time
 import statistics
 import argparse
 
-def measure_latency(target_host, target_port, num_packets=10):
+def measure_latency(target_host, target_port, num_packets=10, payload_size=1024):
     latencies = []
     errors = 0
     for _ in range(num_packets):
@@ -12,7 +12,7 @@ def measure_latency(target_host, target_port, num_packets=10):
                 sock.settimeout(2)
                 sock.connect((target_host, target_port))
                 start_time = time.time()
-                sock.sendall(b'ping')
+                sock.sendall(b'X' * payload_size)  # Send 1KB
                 response = sock.recv(1024)
                 if response:
                     latencies.append(time.time() - start_time)
