@@ -73,7 +73,9 @@ class DIF:
                 #logging.debug(f"Raw data received: {raw_data}")
 
                 try:
-                    # Unpack binary protocol first
+                    if len(raw_data) < protocol.HEADER_SIZE + protocol.FLOW_ID_LENGTH:
+                        logging.debug("Incomplete binary message; skipping")
+                        continue
                     timestamp, flow_id, payload = protocol.unpack_message(raw_data)
                     #logging.info(f"Received data for flow {flow_id} with payload: {payload}")
 
@@ -108,6 +110,9 @@ class DIF:
                     logging.debug(f"Received JSON message: {message}")
                     
                     if message.get('type') == 'teardown':
+                        if 'flow_id' not in message or 'apn' not in message:
+                            logging.error("Invalid teardown request: missing fields")
+                            continue
                         flow_id = message.get('flow_id')
                         apn = message.get('apn')
                         logging.info(f"Processing teardown request for APN: {apn}, Flow: {flow_id}")

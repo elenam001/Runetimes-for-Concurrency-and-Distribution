@@ -1,3 +1,4 @@
+'''
 import subprocess
 import argparse
 import csv
@@ -105,3 +106,30 @@ def main():
 
 if __name__ == "__main__":
     main()
+'''
+import socket
+import time
+
+TCP_HOST = "localhost"
+TCP_PORT = 11000
+
+print("[Benchmark] Connecting to Hybrid Gateway...")
+
+# Start TCP connection to gateway
+tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+tcp_sock.connect((TCP_HOST, TCP_PORT))
+
+start_time = time.time()
+
+for i in range(100):
+    msg = f"Packet {i}".encode()
+    tcp_sock.sendall(msg)
+    
+    response = tcp_sock.recv(1024)
+    print(f"[Benchmark] Received: {response.decode()}")
+
+end_time = time.time()
+
+print(f"[Benchmark] Hybrid Network Test Completed in {end_time - start_time:.3f} sec")
+
+tcp_sock.close()

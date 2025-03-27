@@ -57,7 +57,7 @@ class Flow:
             self.connected = False
             self.packets_sent = 0
             
-    def send(self, payload_size=1024, retries=2):
+    def send(self, payload_size=1024, retries=5):
         for attempt in range(retries):
             try:
                 if not self.connected:
@@ -70,30 +70,6 @@ class Flow:
                 logging.warning(f"Packet transmission failed: {e}")
             time.sleep(0.01 * (2 ** attempt))  # Exponential backoff
         return None
-    
-    '''
-    def send(self, payload_size=1024, retries=5):
-        self._send_heartbeat()
-        for attempt in range(retries):
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 10))  # Graceful close
-                    s.settimeout(10)
-                if not self.connected:
-                    self.allocate()
-                latency = send_data(self.host, self.port, self.flow_id, self.apn, payload_size)
-                if latency:
-                    self.packets_sent += 1  # Increment on success
-                    if self.packets_sent >= self.reuse_threshold:
-                        self.teardown()  # Teardown only after threshold
-                    return latency
-            except Exception as e:
-                delay = 0.2 * (2 ** attempt)  # Exponential backoff: 0.2s, 0.4s, 0.8s...
-                print(f"Attempt {attempt+1} failed. Retrying in {delay:.1f}s...")
-                time.sleep(delay)
-        return None
-    '''
-
     
     def _send_heartbeat(self):
         try:
