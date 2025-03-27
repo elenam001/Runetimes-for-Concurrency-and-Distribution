@@ -1,4 +1,3 @@
-import json
 import logging
 import socket
 import os
@@ -17,7 +16,6 @@ def allocate_flow(host, port, dest_apn):
                 payload=f"REQ:{dest_apn}".encode()  # Required argument
             )            
             s.sendall(request)
-            logging.debug(f"Sending flow allocation request: {json.dumps({'type': 'flow_allocation_request', 'dest_apn': dest_apn})}")
             # Read full response
             response = s.recv(1024)
             _, flow_id, _ = protocol.unpack_message(response)
@@ -25,24 +23,6 @@ def allocate_flow(host, port, dest_apn):
     except Exception as e:
         logging.error(f"Flow allocation error: {str(e)}")
         return None
-'''
-def allocate_flow(host, port, dest_apn):
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(10)
-            s.connect((host, port))
-            request = protocol.pack_message(
-                flow_id="FLOW_REQ",
-                payload=f"REQ:{dest_apn}".encode()  # Ensure this matches server expectations
-            )
-            s.sendall(request)
-            response = s.recv(1024)
-            _, flow_id, _ = protocol.unpack_message(response)
-            return flow_id
-    except Exception as e:
-        logging.error(f"Flow allocation error: {str(e)}")
-        return None
-'''
 
 def send_data(host, port, flow_id, dest_apn, payload_size=1024):
     start = time.time()

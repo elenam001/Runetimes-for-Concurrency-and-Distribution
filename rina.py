@@ -3,7 +3,6 @@ import signal
 import socket
 import statistics
 import sys
-import json
 import logging
 import threading
 import time
@@ -70,71 +69,69 @@ class DIF:
                 if not raw_data:
                     break
 
-                #logging.debug(f"Raw data received: {raw_data}")
-
                 try:
                     if len(raw_data) < protocol.HEADER_SIZE + protocol.FLOW_ID_LENGTH:
                         logging.debug("Incomplete binary message; skipping")
                         continue
+                    
                     timestamp, flow_id, payload = protocol.unpack_message(raw_data)
-                    #logging.info(f"Received data for flow {flow_id} with payload: {payload}")
 
-                    # Handle HEARTBEAT messages separately
+                    # Handle different message types
                     if flow_id == "HEARTBEAT":
-                        #logging.info("Processing HEARTBEAT message.")
                         response = protocol.pack_message(flow_id="HEARTBEAT", payload=b"ACK")
                         client_sock.sendall(response)
-                        client_sock.close()  # Close socket explicitly
-                        return  # Exit loop to prevent further errors
+                        client_sock.close()
+                        return
+                    
+                    # Flow allocation request
                     if payload.startswith(b"REQ:"):
                         dest_apn = payload.split(b":")[1].decode().strip()
+                        ipcp = naming_registry.resolve(dest_apn)
+                        if ipcp:
+                            new_flow_id = f"{dest_apn}-flow-{time.time()}"
+                            response = protocol.pack_message(
+                                flow_id=new_flow_id,
+                                payload=b"ACK"
+                            )
+                            client_sock.sendall(response)
+                            ipcp.flows[new_flow_id] = (client_sock.getpeername(), time.time())
+                        else:
+                            logging.error(f"No IPCP found for APN: {dest_apn}")
+                    
+                    # Teardown request
+                    elif payload.startswith(b"TEARDOWN:"):
+                        try:
+                            # Extract flow ID from payload
+                            _, flow_to_delete = payload.split(b":")
+                            flow_id = flow_to_delete.decode()
+                            
+                            # Extract APN from flow_id format: "APN-flow-timestamp"
+                            apn = flow_id.split('-')[0]
+                            ipcp = naming_registry.resolve(apn)
+                            
+                            if ipcp and flow_id in ipcp.flows:
+                                del ipcp.flows[flow_id]
+                                response = protocol.pack_message(flow_id=flow_id, payload=b"TEARDOWN_ACK")
+                                client_sock.sendall(response)
+                            else:
+                                logging.error(f"Teardown failed: Invalid flow {flow_id} for APN {apn}")
+                                
+                        except Exception as e:
+                            logging.error(f"Teardown processing error: {e}")
+                    
+                    # Regular data packet
                     else:
-                        dest_apn = flow_id.split("-")[0].strip()
-
-                    logging.debug(f"Extracted APN: {dest_apn}")
-
-                    ipcp = naming_registry.resolve(dest_apn)
-                    if ipcp:
-                        ipcp.handle_binary_message(timestamp, flow_id, payload, client_sock)
-                    else:
-                        logging.error(f"No IPCP found for APN: {dest_apn}")
-
-                    continue  # If binary parsing succeeds, skip JSON parsing
+                        response = protocol.pack_message(flow_id=flow_id, payload=b"ACK")
+                        client_sock.sendall(response)
 
                 except Exception as e:
-                    logging.debug(f"Binary parse failed: {e}")
-
-                # JSON fallback for flow allocation
-                try:
-                    message = json.loads(raw_data.decode())
-                    logging.debug(f"Received JSON message: {message}")
-                    
-                    if message.get('type') == 'teardown':
-                        if 'flow_id' not in message or 'apn' not in message:
-                            logging.error("Invalid teardown request: missing fields")
-                            continue
-                        flow_id = message.get('flow_id')
-                        apn = message.get('apn')
-                        logging.info(f"Processing teardown request for APN: {apn}, Flow: {flow_id}")
-
-                        ipcp = naming_registry.resolve(apn)
-                        if ipcp and flow_id in ipcp.flows:
-                            del ipcp.flows[flow_id]
-                            response = json.dumps({"status": "Teardown successful"}).encode()
-                            client_sock.sendall(response)
-                            logging.info(f"Teardown successful for {flow_id}")
-                        else:
-                            logging.warning(f"Teardown requested for unknown flow/APN: {apn}, {flow_id}")
-
-                        continue
-
-                except json.JSONDecodeError as e:
-                    logging.warning(f"Invalid JSON message: {raw_data} - {e}")
+                    logging.error(f"Error processing binary message: {e}")
 
         except Exception as e:
             logging.error(f"Connection error: {e}", exc_info=True)
         finally:
             client_sock.close()
+
 
 
             
@@ -162,26 +159,31 @@ class IPCP:
     
     def handle_message(self, message, client_sock, client_addr):
         try:
+            # Unpack binary message
             timestamp, flow_id, payload = protocol.unpack_message(message)
-            if payload == b"FLOW_REQ":
-                new_flow_id = f"{self.apn}-flow-{time.time()}"
+            
+            # Handle flow allocation requests
+            if payload.startswith(b"REQ:"):
+                dest_apn = payload.split(b":")[1].decode()
+                new_flow_id = f"{dest_apn}-flow-{time.time()}"
                 response = protocol.pack_message(
                     flow_id=new_flow_id,
-                    payload=b"FLOW_OK"
+                    payload=b"ACK"
                 )
                 client_sock.sendall(response)
                 self.flows[new_flow_id] = (client_addr, time.time())
-        except:
-            message = json.loads(message.decode())
-            msg_type = message.get("type")
-            if msg_type == "flow_allocation_request":
-                flow_id = f"{self.apn}-flow-{time.time()}"
-                response = json.dumps({"flow_id": flow_id}).encode()
+            
+            # Handle data transfers
+            else:
+                # Process data payload here
+                response = protocol.pack_message(
+                    flow_id=flow_id,
+                    payload=b"ACK"
+                )
                 client_sock.sendall(response)
-            elif msg_type == "data_transfer":
-                flow_id = message.get("flow_id")  # Ensure this line exists!
-                response = json.dumps({"type": "ack", "flow_id": flow_id}).encode()
-                client_sock.sendall(response)
+
+        except Exception as e:
+            logging.error(f"Error handling binary message: {e}")
 
 
     def handle_binary_message(self, timestamp, flow_id, payload, sock):
@@ -200,7 +202,9 @@ class IPCP:
             response = protocol.pack_message(flow_id=new_flow_id, payload=b"ACK")
             sock.sendall(response)
             self.flows[new_flow_id] = (sock.getpeername(), time.time())
-        elif payload == b"TEARDOWN":
+        elif payload.startswith(b"TEARDOWN:"):
+            _, flow_to_delete = payload.split(b":")
+            flow_id = flow_to_delete.decode()
             if flow_id in self.flows:
                 del self.flows[flow_id]
                 sock.sendall(protocol.pack_message(flow_id=flow_id, payload=b"TEARDOWN_ACK"))
@@ -213,15 +217,23 @@ class IPCP:
 # Client Simulation
 # ----------------------------
 def client_simulation(src_apn, dest_apn, dest_host, dest_port, payload_size=1024, num_transfers=10):
-    # Allocate flow using JSON (compatibility)
+    # Allocate flow using binary protocol
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as alloc_sock:
         alloc_sock.connect((dest_host, dest_port))
-        alloc_sock.send(json.dumps({"type": "flow_allocation_request", "src_apn": src_apn, "dest_apn": dest_apn}).encode())
+        
+        # Send binary flow request
+        request = protocol.pack_message(
+            flow_id="FLOW_REQ",
+            payload=f"REQ:{dest_apn}".encode()
+        )
+        alloc_sock.sendall(request)
+        
+        # Get binary response
         resp = alloc_sock.recv(4096)
-        try:
-            flow_id = json.loads(resp)["flow_id"]
-        except Exception as e:
-            logging.error("Failed to extract flow_id from response: %s", e)
+        _, flow_id, _ = protocol.unpack_message(resp)
+        
+        if not flow_id:
+            logging.error("Failed to allocate flow")
             return
 
     # Data transfer using binary protocol
@@ -233,13 +245,13 @@ def client_simulation(src_apn, dest_apn, dest_host, dest_port, payload_size=1024
             payload = os.urandom(payload_size)
             start = time.time()
             
-            # Pack message using binary protocol
+            # Send binary data packet
             data_sock.sendall(protocol.pack_message(
                 flow_id=flow_id,
                 payload=payload
             ))
             
-            # Wait for acknowledgment
+            # Wait for binary acknowledgment
             ack_data = data_sock.recv(4096)
             _, ack_flow_id, ack_payload = protocol.unpack_message(ack_data)
             latencies.append(time.time() - start)
@@ -288,6 +300,6 @@ if __name__ == '__main__':
         )
 
 
-# Server mode (Terminal 1) python rina.py --server --port 10002 --node NodeA --apn APN_A
+# Server mode (Terminal 1) python rina.py --server --port 10000 --node NodeA --apn APN_A
 
 # Client mode (Terminal 2) python rina.py --dest_port 10000 --dest_apn APN_TCP --apn APN_A

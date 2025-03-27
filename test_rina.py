@@ -8,6 +8,7 @@ from flow import Flow
 
 
 def run_test(host, port, dest_apn, num_packets=100, payload_kb=1, teardown_interval=10, warmup_packets=0, retries=3):
+    start_time = time.time()  
     flow = Flow(dest_apn, host, port)
     flow.allocate()
 
@@ -51,13 +52,16 @@ def run_test(host, port, dest_apn, num_packets=100, payload_kb=1, teardown_inter
             results["failures"] += 1
 
         time.sleep(0.01)
+        
+    end_time = time.time()
+    total_wall_time = end_time - start_time
 
     if results["successes"] > 0:
         total_time = sum(results["latencies"])
         results.update({
             "avg_latency": statistics.mean(results["latencies"]),
             "jitter": statistics.stdev(results["latencies"]) if len(results["latencies"]) > 1 else 0,
-            "throughput": (results["successes"] * results["payload_size"]) / total_time,
+            "throughput": (results["successes"] * results["payload_size"]) / total_wall_time,
             "avg_setup_time": statistics.mean(results["setup_times"]) if results["setup_times"] else 0,
             "avg_rtt" : statistics.mean(results["latencies"]) * 2
         })
