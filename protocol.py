@@ -3,27 +3,18 @@ import struct
 import time
 
 # Define binary header format (8-byte timestamp + 4-byte payload size)
-HEADER_FORMAT = '!dI'  # 8B timestamp + 4B payload size (Big-Endian)
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-FLOW_ID_LENGTH = 32  # Fixed-length flow ID
+HEADER_FORMAT = '!dI'  # Keep original format with timestamp and size
+HEADER_SIZE = struct.calcsize(HEADER_FORMAT)  # Should be 12 bytes (8 + 4)
+FLOW_ID_LENGTH = 32
 
 def pack_message(flow_id: str, payload: bytes) -> bytes:
-    """
-    Pack message into binary format with a fixed-size header.
-
-    Format:
-    - 8B Timestamp (double)
-    - 4B Payload Size (unsigned int)
-    - 32B Flow ID (null-padded)
-    - Variable-length Payload
-    """
-    # Ensure flow_id is exactly FLOW_ID_LENGTH bytes (null-padded)
+    """Pack message with timestamp and payload size"""
     flow_bytes = flow_id.encode().ljust(FLOW_ID_LENGTH, b'\0')[:FLOW_ID_LENGTH]
-
-    # Create the header
-    header = struct.pack(HEADER_FORMAT, time.time(), len(payload))
-
-    # Return the full packed message
+    header = struct.pack(
+        HEADER_FORMAT, 
+        time.time(),    # 8B timestamp (double)
+        len(payload)    # 4B payload size (unsigned int)
+    )
     return header + flow_bytes + payload
 
 def unpack_message(data: bytes) -> tuple:

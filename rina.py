@@ -80,7 +80,6 @@ class DIF:
                     if flow_id == "HEARTBEAT":
                         response = protocol.pack_message(flow_id="HEARTBEAT", payload=b"ACK")
                         client_sock.sendall(response)
-                        client_sock.close()
                         return
                     
                     # Flow allocation request
@@ -130,7 +129,10 @@ class DIF:
         except Exception as e:
             logging.error(f"Connection error: {e}", exc_info=True)
         finally:
-            client_sock.close()
+            try:
+                client_sock.close()
+            except:
+                pass
 
 
 
