@@ -2,7 +2,9 @@ import logging
 import socket
 import time
 import protocol
-from rina_utils import allocate_flow, send_data
+import asyncio
+import statistics
+import os
 
 class Flow:
     def __init__(self, apn, host, port):
@@ -12,97 +14,98 @@ class Flow:
         self.flow_id = None
         self.connected = False
         self.reuse_threshold = 20
-        self.packets_sent = 0 
+        self.packets_sent = 0
+        self._reader = None
+        self._writer = None
 
-    def allocate(self, retries=5):
+    async def allocate(self, retries=5):
         for attempt in range(retries):
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(5)
-                    s.connect((self.host, self.port))
+                self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
+                self.connected = True
+                # Send allocation request
+                request = protocol.pack_message(
+                    flow_id="FLOW_REQ",
+                    payload=f"REQ:{self.apn}".encode()
+                )
+                self._writer.write(request)
+                await self._writer.drain()
 
-                    # Send binary allocation request
-                    request = protocol.pack_message(
-                        flow_id="FLOW_REQ",
-                        payload=f"REQ:{self.apn}".encode()
-                    )
-                    s.sendall(request)
+                # Read response
+                response = await self._reader.read(65536)
+                _, received_flow_id, _ = protocol.unpack_message(response)
 
-                    response = s.recv(4096) #Increased buffer size.
-                    _, received_flow_id, _ = protocol.unpack_message(response)
+                if not received_flow_id:
+                    raise ValueError("No flow ID received from server.")
 
-                    if not received_flow_id:
-                        raise ValueError("No flow ID received from server.")
-
-                    self.flow_id = received_flow_id
-
-                    # Verify flow
-                    test_payload = protocol.pack_message(
-                        flow_id=self.flow_id,
-                        payload=b"TEST_PACKET"
-                    )
-                    s.sendall(test_payload)
-                    ack = s.recv(4096) #Increased buffer size.
-                    self.connected = True
-                    return
+                self.flow_id = received_flow_id
+                return
 
             except Exception as e:
                 logging.error(f"Allocation attempt {attempt+1} failed: {str(e)}")
-                time.sleep(2 ** attempt)
+                await asyncio.sleep(2 ** attempt)
+
         self.connected = False
         raise Exception("Flow allocation failed after retries.")
 
-            
-    def teardown(self):
-        if not self.flow_id:
+    async def teardown(self):
+        if not self.flow_id or not self._writer:
             return
         try:
-            with socket.socket() as s:
-                s.connect((self.host, self.port))
-                teardown_msg = protocol.pack_message(
-                    flow_id=self.flow_id,
-                    payload=f"TEARDOWN:{self.flow_id}".encode()
-                )
-                s.sendall(teardown_msg)
-                ack = s.recv(1024)
+            teardown_msg = protocol.pack_message(
+                flow_id=self.flow_id,
+                payload=f"TEARDOWN:{self.flow_id}".encode()
+            )
+            self._writer.write(teardown_msg)
+            await self._writer.drain()
+            ack = await self._reader.read(65536)
         except Exception as e:
             logging.error(f"Teardown error: {e}")
         finally:
+            if self._writer:
+                self._writer.close()
+                await self._writer.wait_closed()
+            self._reader = None
+            self._writer = None
             self.flow_id = None
             self.connected = False
-            
-    def send(self, payload_size=1024, retries=3, parallel=4):
-        for attempt in range(retries):
-            try:
-                if not self.connected:
-                    self.allocate()
-                    
-                latency = send_data(
-                    self.host,
-                    self.port,
-                    self.flow_id,
-                    self.apn,
-                    payload_size,
-                    parallel_connections=parallel  # Add this parameter
-                )
-                
-                if latency:
-                    # Update packet count based on parallel success
-                    self.packets_sent += parallel  
-                    return latency
-                    
-            except Exception as e:
-                logging.warning(f"Transmission failed: {e}")
-                
+
+    async def send(self, payload_size=1024, retries=2, parallel=4):
+        if not self.connected:
+            await self.allocate()
+            if not self.connected:
+                return None
+
+        latencies = await self._async_send_data(payload_size, parallel)
+        if latencies:
+            self.packets_sent += parallel
+            return statistics.mean(latencies)
         return None
-    
-    def _send_heartbeat(self):
+
+    async def _async_send_data(self, payload_size, parallel_connections):
+        latencies = []
+        for _ in range(parallel_connections):
+            try:
+                payload = os.urandom(payload_size)
+                start_time = time.time()
+                self._writer.write(protocol.pack_message(self.flow_id, payload))
+                await self._writer.drain()
+                ack = await self._reader.read(65536)
+                latency = time.time() - start_time
+                latencies.append(latency)
+            except Exception as e:
+                logging.error(f"Error sending data: {e}")
+        return latencies
+
+    async def _send_heartbeat(self):
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect((self.host, self.port))
-                s.send(protocol.pack_message(
-                    flow_id="HEARTBEAT",
-                    payload=b""  # Explicit empty payload
-                ))
-        except:
-            pass
+            reader, writer = await asyncio.open_connection(self.host, self.port)
+            writer.write(protocol.pack_message(
+                flow_id="HEARTBEAT",
+                payload=b""
+            ))
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+        except Exception as e:
+            logging.debug(f"Heartbeat failed: {str(e)}")

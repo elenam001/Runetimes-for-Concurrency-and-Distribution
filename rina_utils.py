@@ -19,7 +19,7 @@ def allocate_flow(host, port, dest_apn):
             )            
             s.sendall(request)
             # Read full response
-            response = s.recv(1024)
+            response = s.recv(65536)
             _, flow_id, _ = protocol.unpack_message(response)
             return flow_id
     except Exception as e:
@@ -45,7 +45,7 @@ def send_data(host, port, flow_id, dest_apn, payload_size=1024, parallel_connect
                 s.sendall(packed)
                 
                 # Wait for ACK
-                ack_data = s.recv(4096)
+                ack_data = s.recv(65536)
                 protocol.unpack_message(ack_data)
                 
                 return time.time() - start
