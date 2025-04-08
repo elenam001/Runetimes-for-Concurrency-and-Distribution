@@ -2,6 +2,7 @@ import os
 import signal
 import socket
 import statistics
+import struct
 import sys
 import logging
 import threading
@@ -22,8 +23,9 @@ class NamingRegistry:
         self.registry = {}
 
     def register(self, apn, ipcp):
+        if ':' in apn:
+            raise ValueError("APN cannot contain ':'")
         self.registry[apn] = ipcp
-        logging.info("Registered APN '%s' with IPCP instance.", apn)
 
     def resolve(self, apn):
         return self.registry.get(apn, None)
@@ -43,9 +45,9 @@ class DIF:
         except OSError as e:
             logging.error(f"Failed to bind port {self.port}: {e}")
             raise
-        self.server_socket.listen(10)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)  # Enable keepalive
-        self.server_socket.settimeout(None)  # Remove the timeout for asyncio
+        self.server_socket.listen(10)  # Increased from 10
+        self.server_socket.settimeout(None)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         logging.info("%s: DIF started on %s:%d", self.node_name, self.host, self.port)
 
         signal.signal(signal.SIGINT, self.shutdown)
@@ -76,68 +78,85 @@ class DIF:
                 logging.error(f"Server error: {str(e)}")
                 break
 
-    async def handle_client(self, client_sock, addr):  # Make the client handler an async function
+    async def handle_client(self, client_sock, addr):
         loop = asyncio.get_running_loop()
         try:
+            buffer = b''
             while True:
-                raw_data = await loop.sock_recv(client_sock, 65536)  # Asynchronously receive data
-                if not raw_data:
+                # Read header
+                header_data = await loop.sock_recv(client_sock, protocol.HEADER_SIZE - len(buffer))
+                if not header_data:
                     break
+                buffer += header_data
+                if len(buffer) < protocol.HEADER_SIZE:
+                    continue
+                
+                # Unpack header
+                timestamp, payload_size = struct.unpack(protocol.HEADER_FORMAT, buffer[:protocol.HEADER_SIZE])
+                buffer = buffer[protocol.HEADER_SIZE:]
+                
+                # Read flow ID
+                flow_id_data = await loop.sock_recv(client_sock, protocol.FLOW_ID_LENGTH - len(buffer))
+                buffer += flow_id_data
+                if len(buffer) < protocol.FLOW_ID_LENGTH:
+                    continue
+                flow_id = buffer[:protocol.FLOW_ID_LENGTH].decode().rstrip('\0')
+                buffer = buffer[protocol.FLOW_ID_LENGTH:]
+                
+                # Read payload
+                payload_data = await loop.sock_recv(client_sock, payload_size - len(buffer))
+                buffer += payload_data
+                if len(buffer) < payload_size:
+                    continue
+                payload = buffer[:payload_size]
+                buffer = buffer[payload_size:]
+                
+                # Process message
+                if flow_id == "HEARTBEAT":
+                    response = protocol.pack_message(flow_id="HEARTBEAT", payload=b"ACK")
+                    await loop.sock_sendall(client_sock, response)
+                    continue
 
-                try:
-                    if len(raw_data) < protocol.HEADER_SIZE + protocol.FLOW_ID_LENGTH:
-                        logging.debug("Incomplete binary message; skipping")
-                        continue
-
-                    timestamp, flow_id, payload = protocol.unpack_message(raw_data)
-
-                    # Handle different message types
-                    if flow_id == "HEARTBEAT":
-                        response = protocol.pack_message(flow_id="HEARTBEAT", payload=b"ACK")
+                # Flow allocation request
+                if payload.startswith(b"REQ:"):
+                    dest_apn = payload.split(b":")[1].decode().strip()
+                    ipcp = naming_registry.resolve(dest_apn)
+                    if ipcp:
+                        new_flow_id = f"{dest_apn}:flow:{time.time()}"
+                        response = protocol.pack_message(
+                            flow_id=new_flow_id,
+                            payload=b"ACK"
+                        )
                         await loop.sock_sendall(client_sock, response)  # Asynchronously send data
-                        continue # Keep connection alive
-
-                    # Flow allocation request
-                    if payload.startswith(b"REQ:"):
-                        dest_apn = payload.split(b":")[1].decode().strip()
-                        ipcp = naming_registry.resolve(dest_apn)
-                        if ipcp:
-                            new_flow_id = f"{dest_apn}-flow-{time.time()}"
-                            response = protocol.pack_message(
-                                flow_id=new_flow_id,
-                                payload=b"ACK"
-                            )
-                            await loop.sock_sendall(client_sock, response)  # Asynchronously send data
-                            ipcp.flows[new_flow_id] = (client_sock.getpeername(), time.time())
-                        else:
-                            logging.error(f"No IPCP found for APN: {dest_apn}")
-
-                    # Teardown request
-                    elif payload.startswith(b"TEARDOWN:"):
-                        try:
-                            _, flow_to_delete = payload.split(b":")
-                            flow_id_to_delete = flow_to_delete.decode()
-
-                            apn = flow_id_to_delete.split('-')[0]
-                            ipcp = naming_registry.resolve(apn)
-
-                            if ipcp and flow_id_to_delete in ipcp.flows:
-                                del ipcp.flows[flow_id_to_delete]
-                                response = protocol.pack_message(flow_id=flow_id_to_delete, payload=b"TEARDOWN_ACK")
-                                await loop.sock_sendall(client_sock, response)  # Asynchronously send data
-                            else:
-                                logging.error(f"Teardown failed: Invalid flow {flow_id_to_delete} for APN {apn}")
-
-                        except Exception as e:
-                            logging.error(f"Teardown processing error: {e}")
-
-                    # Regular data packet
+                        ipcp.flows[new_flow_id] = (client_sock.getpeername(), time.time())
                     else:
-                        response = protocol.pack_message(flow_id=flow_id, payload=b"ACK")
-                        await loop.sock_sendall(client_sock, response)  # Asynchronously send data
+                        logging.error(f"No IPCP found for APN: {dest_apn}")
 
-                except Exception as e:
-                    logging.error(f"Error processing binary message: {e}")
+                # Teardown request
+                elif payload.startswith(b"TEARDOWN:"):
+                    try:
+                        # Split on bytes delimiter
+                        _, flow_id_part = payload.split(b":", 1)  # <-- Fix here
+                        flow_id_to_delete = flow_id_part.decode()
+                        apn = flow_id_to_delete.split(":", 1)[0]
+                        ipcp = naming_registry.resolve(apn)
+                        
+                        if ipcp and flow_id_to_delete in ipcp.flows:
+                            del ipcp.flows[flow_id_to_delete]
+                            response = protocol.pack_message(flow_id=flow_id_to_delete, payload=b"TEARDOWN_ACK")
+                            await loop.sock_sendall(client_sock, response)
+                        else:
+                            logging.error(f"Teardown failed: Invalid flow {flow_id_to_delete} for APN {apn}")
+                            
+                    except ValueError as e:
+                        logging.error(f"Invalid teardown payload format: {e}")
+                    except Exception as e:
+                        logging.error(f"Teardown processing error: {e}")
+
+                # Regular data packet
+                else:
+                    response = protocol.pack_message(flow_id=flow_id, payload=b"ACK")
+                    await loop.sock_sendall(client_sock, response)  # Asynchronously send data
 
         except Exception as e:
             logging.error(f"Connection error: {e}", exc_info=True)
@@ -173,18 +192,22 @@ class IPCP:
         self.flows = {}
         naming_registry.register(apn, self)
 
-    # ... (rest of your IPCP class remains mostly the same for this basic example)
     def handle_incoming_data(self, timestamp, flow_id, payload, sock):
         if payload.startswith(b"REQ:"):
             dest_apn = payload.split(b":")[1].decode().strip()
-            new_flow_id = f"{dest_apn}-flow-{time.time()}"
+            new_flow_id = f"{dest_apn}:flow:{time.time()}"  # <-- Changed "-" to ":"
             response = protocol.pack_message(flow_id=new_flow_id, payload=b"ACK")
             sock.sendall(response)
             self.flows[new_flow_id] = (sock.getpeername(), time.time())
         elif payload.startswith(b"TEARDOWN:"):
             try:
-                _, flow_to_delete = payload.split(b":")
-                flow_id_to_delete = flow_to_delete.decode()
+                try:
+                    _, flow_id_part = payload.split(b":", 1)  # Split only once
+                    flow_id_to_delete = flow_id_part.decode()
+                except ValueError:
+                    logging.error(f"Invalid teardown payload format: {payload.decode()}")
+                    return
+                flow_id_to_delete = flow_id_to_delete.decode()
                 if flow_id_to_delete in self.flows:
                     del self.flows[flow_id_to_delete]
                     sock.sendall(protocol.pack_message(flow_id=flow_id_to_delete, payload=b"TEARDOWN_ACK"))
@@ -202,6 +225,7 @@ class IPCP:
 # ----------------------------
 async def async_client_simulation(src_apn, dest_apn, dest_host, dest_port, payload_size=1024, num_transfers=10):
     flow = Flow(dest_apn, dest_host, dest_port)
+    flow.retry_base_delay = 0.2
     try:
         await flow.allocate()
         if not flow.connected:
@@ -211,7 +235,7 @@ async def async_client_simulation(src_apn, dest_apn, dest_host, dest_port, paylo
         latencies = []
         for _ in range(num_transfers):
             start = time.time()
-            await flow.send(payload_size=payload_size, parallel=1) # Assuming send is now async
+            await flow.send(payload_size=4096, parallel=16)
             latencies.append(time.time() - start)
 
         await flow.teardown()

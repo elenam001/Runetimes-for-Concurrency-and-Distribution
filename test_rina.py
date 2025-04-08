@@ -1,3 +1,4 @@
+from concurrent.futures import process
 import logging
 import sys
 import time
@@ -8,8 +9,8 @@ import os
 from datetime import datetime
 from flow import Flow
 import asyncio
-
 import protocol
+import psutil
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -17,6 +18,7 @@ if sys.platform == "win32":
 async def async_run_test(host, port, dest_apn, num_packets=100, payload_kb=1, teardown_interval=10, warmup_packets=0, retries=3):
     start_time = time.time()
     flow = Flow(dest_apn, host, port)
+    flow.retry_base_delay = 0.2
     await flow.allocate()
     if not flow.connected:
         logging.error("Failed to allocate flow for testing.")
@@ -55,6 +57,7 @@ async def async_run_test(host, port, dest_apn, num_packets=100, payload_kb=1, te
 
         success = False
         for attempt in range(retries):
+            #await asyncio.sleep(min(0.2 * (2 ** attempt), 2.0))
             try:
                 latency = await flow.send(payload_size=results["payload_size"])
                 if latency:
@@ -64,11 +67,11 @@ async def async_run_test(host, port, dest_apn, num_packets=100, payload_kb=1, te
                     break
                 else:
                     results["retries"] += 1
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(min(0.1 * (2 ** attempt), 1.0)) 
             except Exception as e:
                 logging.error(f"Error sending packet {i}, attempt {attempt + 1}: {e}")
                 results["failures"] += 1
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(min(0.1 * (2 ** attempt), 1.0))
 
         if not success:
             results["failures"] += 1
@@ -79,21 +82,18 @@ async def async_run_test(host, port, dest_apn, num_packets=100, payload_kb=1, te
     total_wall_time = end_time - start_time
 
     if results["successes"] > 0:
-        total_time = sum(results["latencies"])
-        results.update({
-            "avg_latency": statistics.mean(results["latencies"]),
-            "jitter": statistics.stdev(results["latencies"]) if len(results["latencies"]) > 1 else 0,
-            "throughput": (results["successes"] * results["payload_size"]) / total_wall_time,
-            "avg_setup_time": statistics.mean(results["setup_times"]) if results["setup_times"] else 0,
-            "avg_rtt" : statistics.mean(results["latencies"]) * 2
-        })
         total_bytes = results["successes"] * (
             results["payload_size"] + 
             protocol.HEADER_SIZE + 
             protocol.FLOW_ID_LENGTH
         )
         results.update({
-            "throughput": total_bytes / total_wall_time,
+            "avg_latency": statistics.mean(results["latencies"]),
+            "jitter": statistics.stdev(results["latencies"]) if len(results["latencies"]) > 1 else 0,
+            "throughput": total_bytes / total_wall_time,  # In bytes/sec
+            "avg_setup_time": statistics.mean(results["setup_times"]) if results["setup_times"] else 0,
+            "avg_rtt": statistics.mean(results["latencies"]) * 2,
+            "memory_usage": psutil.Process().memory_info().rss
         })
     elif not results["setup_times"]:
         results["avg_setup_time"] = 0
@@ -203,7 +203,8 @@ async def main():
                 "jitter": statistics.stdev(aggregated_results["latencies"]) if len(aggregated_results["latencies"]) > 1 else 0,
                 "throughput": total_bytes / total_wall_time,
                 "avg_setup_time": statistics.mean(aggregated_results["setup_times"]) if aggregated_results["setup_times"] else 0,
-                "avg_rtt" : statistics.mean(aggregated_results["latencies"]) * 2
+                "avg_rtt" : statistics.mean(aggregated_results["latencies"]) * 2,
+                "memory_usage": psutil.Process().memory_info().rss
             })
         elif not aggregated_results["setup_times"]:
             aggregated_results["avg_setup_time"] = 0
@@ -231,8 +232,10 @@ async def main():
     if aggregated_results["successes"]:
         print(f"Avg latency: {aggregated_results['avg_latency'] * 1000:.2f}ms")
         print(f"Jitter: {aggregated_results['jitter'] * 1000:.2f}ms")
-        print(f"Throughput: {aggregated_results['throughput'] / 1024:.2f} KiB/s")
+        print(f"Throughput: {aggregated_results['throughput'] / 1024:.2f} KiB/s ({aggregated_results['throughput'] * 8 / (1024*1024):.2f} Mbps)")
         print(f"Avg flow setup time: {aggregated_results['avg_setup_time']:.3f} sec")
+        print(f"avg_rtt: {aggregated_results['avg_rtt']:.3f} sec")
+        print(f"Memory usage: {aggregated_results['memory_usage'] / (1024*1024):.2f} MB")
     else:
         print("No successful transmissions")
 
